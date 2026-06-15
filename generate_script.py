@@ -10,6 +10,7 @@ repeating the same topics.
 import os
 import json
 import re
+import time
 import requests
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -19,8 +20,12 @@ HISTORY_PATH = "topic_history.json"
 MAX_HISTORY_ITEMS = 60  # keep the last N titles to avoid an ever-growing prompt
 
 
-def call_gemini(prompt, max_tokens=2048):
-    """Call Gemini API with a text prompt and return the text response."""
+def call_gemini(prompt, max_tokens=2048, max_retries=5):
+    """Call Gemini API with a text prompt and return the text response.
+
+    Retries with exponential backoff on 429 (rate limit) and 5xx errors,
+    since these are common and usually transient on the free tier.
+    """
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -28,10 +33,21 @@ def call_gemini(prompt, max_tokens=2048):
             "maxOutputTokens": max_tokens,
         }
     }
-    resp = requests.post(GEMINI_URL, json=payload, timeout=60)
+
+    for attempt in range(1, max_retries + 1):
+        resp = requests.post(GEMINI_URL, json=payload, timeout=60)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            wait = min(60, 5 * (2 ** (attempt - 1)))  # 5, 10, 20, 40, 60s
+            print(f"  Gemini returned {resp.status_code}, retrying in {wait}s "
+                  f"(attempt {attempt}/{max_retries})...")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    # Final attempt: raise the real error if all retries exhausted
     resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def extract_json(text):
